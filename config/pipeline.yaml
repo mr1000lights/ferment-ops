@@ -1,0 +1,92 @@
+# Fermentation Data Platform POC - pipeline configuration
+# Every path is relative to the repository root.
+
+paths:
+  raw: data/raw            # immutable landing zone (files exactly as downloaded)
+  bronze: data/bronze      # typed parquet, 1:1 with source, + load metadata
+  warehouse: data/warehouse/fdp.duckdb   # silver + gold live here
+  reports: reports
+  models: data/models
+
+sources:
+  indpensim:
+    description: >
+      IndPenSim - 100 simulated batches of a 100,000 L industrial fed-batch
+      fermentation (Goldrick et al., Univ. of Manchester / UCL). Used as a
+      stand-in for bioreactor sensor + offline lab data.
+    url: "https://data.mendeley.com//datasets/pdnjz7zz5x//1//files//ec0dfb55-7e3c-4124-8b0c-ca8ae7c50fe7//100_Batches_IndPenSim.zip"
+    landing_file: indpensim/100_Batches_IndPenSim.zip
+    timeseries_member: "100_Batches_IndPenSim_V3.csv"
+    statistics_member: "100_Batches_IndPenSim_Statistics.csv"
+    licence: "CC BY 4.0 (Mendeley Data)"
+
+  worldbank_pinksheet:
+    description: World Bank Commodity Price Data (Pink Sheet), monthly prices.
+    url: "https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx"
+    discovery_page: "https://www.worldbank.org/en/research/commodity-markets"
+    landing_file: worldbank/CMO-Historical-Data-Monthly.xlsx
+    sheet: "Monthly Prices"
+    # regex -> canonical commodity code. Matching is case-insensitive.
+    commodities:
+      "^sugar,\\s*world": sugar_world
+      "^sugar,\\s*eu": sugar_eu
+      "^soybean meal": soybean_meal
+      "^fish\\s*meal": fishmeal
+      "^soybeans$": soybeans
+      "^maize": maize
+    licence: "CC BY 4.0 (World Bank)"
+
+  ecb_fx:
+    description: ECB reference rate, USD per EUR, monthly average (SDMX REST API).
+    url: "https://data-api.ecb.europa.eu/service/data/EXR/M.USD.EUR.SP00.A"
+    params: {format: csvdata, startPeriod: "2000-01"}
+    landing_file: ecb/EXR_M_USD_EUR.csv
+    licence: "ECB statistics - free reuse with attribution"
+
+# Process specification used for deviation detection (golden-batch style limits).
+# Values are set for IndPenSim's penicillin process; replace with MicroHarvest
+# process specs in a real deployment.
+process_spec:
+  temperature_k: {low: 297.0, high: 299.5}
+  ph: {low: 6.35, high: 6.65}
+  dissolved_oxygen_mg_l: {low: 6.0, high: null}
+  min_points_for_excursion: 5        # consecutive out-of-spec samples = 1 excursion
+
+# Business scenario: feedstock cost per tonne of microbial protein (illustrative).
+# All assumptions are explicit so reviewers can challenge them.
+unit_economics:
+  molasses_sugar_content: 0.50        # t fermentable sugar per t molasses
+  molasses_price_vs_sugar: 0.35       # molasses priced at ~35% of refined sugar
+  biomass_yield_on_sugar: 0.50        # t dry biomass per t sugar
+  protein_content_of_biomass: 0.60    # >60% raw protein (company claim)
+  leuna_capacity_t_per_year: 15000    # planned plant capacity (t ingredient / year)
+  fishmeal_protein_content: 0.65      # typical crude protein, fishmeal
+  soybean_meal_protein_content: 0.47  # typical crude protein, dehulled soybean meal
+  sugar_feed_concentration_g_l: 600   # IndPenSim sugar feed concentration
+
+reference:
+  # Batch control regimes as published with the IndPenSim data set.
+  control_strategy_ranges:
+    - {from: 1,  to: 30,  strategy: "Recipe driven"}
+    - {from: 31, to: 60,  strategy: "Operator controlled"}
+    - {from: 61, to: 90,  strategy: "Raman APC"}
+    - {from: 91, to: 100, strategy: "Fault scenario"}
+
+ml:
+  monitoring_variables:
+    - substrate_g_l
+    - dissolved_oxygen_mg_l
+    - ph
+    - temperature_k
+    - co2_offgas_pct
+    - oxygen_uptake_rate
+    - vessel_volume_l
+    - sugar_feed_l_h
+    - aeration_rate
+  train_batches: [1, 75]       # normal-operation batches used to fit the model
+  holdout_normal: [76, 90]     # unseen normal batches (false-alarm rate)
+  fault_batches: [91, 100]     # known faulty batches (detection rate)
+  pca_variance: 0.90
+  control_limit_quantile: 0.99
+  consecutive_alarms: 10       # sustained alarm before a batch is flagged
+  early_phase_hours: 60        # yield model only sees the first N hours
